@@ -155,6 +155,9 @@ pub struct XmlTokenizer<Sink> {
     /// Current processing instruction value.
     current_pi_data: RefCell<StrTendril>,
 
+    /// Current CDATA section contents.
+    current_cdata: RefCell<StrTendril>,
+
     /// Record of how many ns we spent in each state, if profiling is enabled.
     state_profile: RefCell<BTreeMap<XmlState, u64>>,
 
@@ -190,6 +193,7 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
             current_comment: RefCell::new(StrTendril::new()),
             current_pi_data: RefCell::new(StrTendril::new()),
             current_pi_target: RefCell::new(StrTendril::new()),
+            current_cdata: RefCell::new(StrTendril::new()),
             current_doctype: RefCell::new(Doctype::default()),
             state_profile: RefCell::new(BTreeMap::new()),
             time_in_sink: Cell::new(0),
@@ -483,6 +487,11 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
         self.process_token(Token::Comment(comment));
     }
 
+    fn emit_current_cdata(&self) {
+        let contents = self.current_cdata.take();
+        self.process_token(Token::CData(contents));
+    }
+
     fn emit_current_doctype(&self) {
         let doctype = self.current_doctype.take();
         self.process_token(Token::Doctype(doctype));
@@ -540,6 +549,8 @@ macro_rules! shorthand (
     ( $me:ident : append_comment $c:expr           ) => ( $me.current_comment.borrow_mut().push_slice($c)     );
     ( $me:ident : emit_comment                     ) => ( $me.emit_current_comment()                          );
     ( $me:ident : clear_comment                    ) => ( $me.current_comment.borrow_mut().clear()            );
+    ( $me:ident : push_cdata $c:expr               ) => ( $me.current_cdata.borrow_mut().push_char(match $c { '\0' => '\u{FFFD}', c => c }) );
+    ( $me:ident : emit_cdata                       ) => ( $me.emit_current_cdata()                            );
     ( $me:ident : create_doctype                   ) => ( *$me.current_doctype.borrow_mut() = Doctype::default() );
     ( $me:ident : push_doctype_name $c:expr        ) => ( option_push(&mut $me.current_doctype.borrow_mut().name, $c) );
     ( $me:ident : push_doctype_id $k:ident $c:expr ) => ( option_push(&mut $me.doctype_id($k), $c)            );
@@ -850,25 +861,28 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 }
             },
             //§ cdata-state
+            // CDATA content is buffered, not emitted: the section must
+            // become one `CDATASection` node, and character references do
+            // not expand inside it.
             XmlState::Cdata => loop {
                 match get_char!(self, input) {
                     ']' => go!(self: to CdataBracket),
-                    cl => go!(self: emit cl),
+                    cl => go!(self: push_cdata cl),
                 }
             },
             //§ cdata-bracket-state
             XmlState::CdataBracket => loop {
                 match get_char!(self, input) {
                     ']' => go!(self: to CdataEnd),
-                    cl => go!(self: emit ']'; emit cl; to Cdata),
+                    cl => go!(self: push_cdata ']'; push_cdata cl; to Cdata),
                 }
             },
             //§ cdata-end-state
             XmlState::CdataEnd => loop {
                 match get_char!(self, input) {
-                    '>' => go!(self: to Data),
-                    ']' => go!(self: emit ']'),
-                    cl => go!(self: emit ']'; emit ']'; emit cl; to Cdata),
+                    '>' => go!(self: emit_cdata; to Data),
+                    ']' => go!(self: push_cdata ']'),
+                    cl => go!(self: push_cdata ']'; push_cdata ']'; push_cdata cl; to Cdata),
                 }
             },
             //§ tag-name-state
@@ -1062,7 +1076,10 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                     '"' => {
                         go!(self: error; clear_doctype_id System; to DoctypeIdentifierDoubleQuoted(System))
                     },
-                    '>' => go!(self: emit_doctype; to Data),
+                    // A PUBLIC external id without a system literal is not
+                    // well-formed: ExternalID with PUBLIC requires both
+                    // literals (<https://www.w3.org/TR/xml/#NT-ExternalID>).
+                    '>' => go!(self: error; emit_doctype; to Data),
                     _ => go!(self: error; to BogusDoctype),
                 }
             },
@@ -1078,7 +1095,9 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
             XmlState::BetweenDoctypePublicAndSystemIdentifiers => loop {
                 match get_char!(self, input) {
                     '\t' | '\n' | '\x0C' | ' ' => (),
-                    '>' => go!(self: emit_doctype; to Data),
+                    // No system literal after the public one: not
+                    // well-formed (<https://www.w3.org/TR/xml/#NT-ExternalID>).
+                    '>' => go!(self: error; emit_doctype; to Data),
                     '\'' => go!(self: to DoctypeIdentifierSingleQuoted System),
                     '"' => go!(self: to DoctypeIdentifierDoubleQuoted System),
                     _ => go!(self: error; to BogusDoctype),

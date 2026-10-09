@@ -93,6 +93,9 @@ pub enum Token {
     ProcessingInstruction(Pi),
     /// Comment token.
     Comment(StrTendril),
+    /// CDATA section token. Unlike `Characters`, this must become a
+    /// `CDATASection` node, not a text node.
+    CData(StrTendril),
     /// Token that represents a series of characters.
     Characters(StrTendril),
     /// End of File found.

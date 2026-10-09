@@ -21,6 +21,17 @@ use std::mem;
 
 pub use self::interface::{ElemName, NodeOrText, Tracer, TreeSink};
 use self::types::*;
+
+/// An XML tree sink: the shared `TreeSink` plus CDATA section creation.
+///
+/// HTML has no CDATA nodes (CDATA sections there are text), so this stays
+/// xml5ever-specific instead of growing the shared trait, which html5ever
+/// sinks also implement.
+pub trait XmlTreeSink: TreeSink {
+    /// Creates a CDATA section node with the given contents.
+    fn create_cdata_section(&self, contents: StrTendril) -> Self::Handle;
+}
+
 use crate::interface::{self, create_element, AppendNode, Attribute, QualName};
 use crate::interface::{AppendText, ExpandedName};
 use crate::tokenizer::{self, EndTag, ProcessResult, StartTag, Tag, TokenSink};
@@ -192,7 +203,7 @@ pub struct XmlTreeBuilder<Handle, Sink> {
 impl<Handle, Sink> XmlTreeBuilder<Handle, Sink>
 where
     Handle: Clone,
-    Sink: TreeSink<Handle = Handle>,
+    Sink: XmlTreeSink<Handle = Handle>,
 {
     /// Create a new tree builder which sends tree modifications to a particular `TreeSink`.
     ///
@@ -326,25 +337,30 @@ where
         // List of already present namespace local name attribute pairs.
         let mut present_attrs: HashSet<(Namespace, LocalName)> = Default::default();
 
-        let mut new_attr = vec![];
-        // First we extract all namespace declarations
+        // Namespace declarations stay in the attribute list: they are real
+        // attributes in the XMLNS namespace, visible to getAttributeNS,
+        // lookupPrefix, and serialization
+        // (<https://dom.spec.whatwg.org/#concept-attribute-namespace>).
+        // Upstream strips them for embedders that bind namespaces
+        // out-of-band; a DOM tree needs them on the element.
+        // Declarations apply to the whole tag regardless of order, so they
+        // are all declared before any other attribute is bound.
         for attr in tag.attrs.iter_mut().filter(|attr| {
             attr.name.prefix == Some(namespace_prefix!("xmlns"))
                 || attr.name.local == local_name!("xmlns")
         }) {
             self.declare_ns(attr);
         }
-
-        // Then we bind those namespace declarations to attributes
-        for attr in tag.attrs.iter_mut().filter(|attr| {
-            attr.name.prefix != Some(namespace_prefix!("xmlns"))
-                && attr.name.local != local_name!("xmlns")
-        }) {
-            if self.bind_attr_qname(&mut present_attrs, &mut attr.name) {
-                new_attr.push(attr.clone());
+        // We need to filter out any duplicate attributes.
+        tag.attrs.retain_mut(|attr| {
+            if attr.name.prefix == Some(namespace_prefix!("xmlns"))
+                || attr.name.local == local_name!("xmlns")
+            {
+                true
+            } else {
+                self.bind_attr_qname(&mut present_attrs, &mut attr.name)
             }
-        }
-        tag.attrs = new_attr;
+        });
 
         // Then we bind the tags namespace.
         self.bind_qname(&mut tag.name);
@@ -399,7 +415,7 @@ where
 impl<Handle, Sink> TokenSink for XmlTreeBuilder<Handle, Sink>
 where
     Handle: Clone,
-    Sink: TreeSink<Handle = Handle>,
+    Sink: XmlTreeSink<Handle = Handle>,
 {
     type Handle = Handle;
 
@@ -415,6 +431,7 @@ where
             tokenizer::Token::ProcessingInstruction(instruction) => Token::Pi(instruction),
             tokenizer::Token::Tag(x) => Token::Tag(x),
             tokenizer::Token::Comment(x) => Token::Comment(x),
+            tokenizer::Token::CData(x) => Token::CData(x),
             tokenizer::Token::NullCharacter => Token::NullCharacter,
             tokenizer::Token::EndOfFile => Token::Eof,
             tokenizer::Token::Characters(x) => Token::Characters(x),
@@ -437,7 +454,7 @@ fn current_node<Handle>(open_elems: &[Handle]) -> &Handle {
 impl<Handle, Sink> XmlTreeBuilder<Handle, Sink>
 where
     Handle: Clone,
-    Sink: TreeSink<Handle = Handle>,
+    Sink: XmlTreeSink<Handle = Handle>,
 {
     fn current_node(&self) -> Ref<'_, Handle> {
         Ref::map(self.open_elems.borrow(), |elems| {
@@ -489,6 +506,14 @@ where
         let target = current_node(&open_elems);
         let comment = self.sink.create_comment(text);
         self.sink.append(target, AppendNode(comment));
+        XmlProcessResult::Done
+    }
+
+    fn append_cdata_to_tag(&self, contents: StrTendril) -> XmlProcessResult<Handle> {
+        let open_elems = self.open_elems.borrow();
+        let target = current_node(&open_elems);
+        let section = self.sink.create_cdata_section(contents);
+        self.sink.append(target, AppendNode(section));
         XmlProcessResult::Done
     }
 
@@ -605,7 +630,7 @@ fn any_not_whitespace(x: &StrTendril) -> bool {
 impl<Handle, Sink> XmlTreeBuilder<Handle, Sink>
 where
     Handle: Clone,
-    Sink: TreeSink<Handle = Handle>,
+    Sink: XmlTreeSink<Handle = Handle>,
 {
     fn step(&self, mode: XmlPhase, token: Token) -> XmlProcessResult<<Self as TokenSink>::Handle> {
         self.debug_step(mode, &token);
@@ -651,6 +676,13 @@ where
                 },
                 Token::Comment(comment) => self.append_comment_to_doc(comment),
                 Token::Pi(pi) => self.append_pi_to_doc(pi),
+                // Character data is not allowed outside the document element,
+                // and a CDATA section is character data even when blank.
+                Token::CData(_) => {
+                    self.sink
+                        .parse_error(Borrowed("Unexpected CDATA section outside the document element"));
+                    XmlProcessResult::Done
+                }
                 Token::Characters(ref chars) if !any_not_whitespace(chars) => {
                     XmlProcessResult::Done
                 },
@@ -747,6 +779,7 @@ where
                 },
                 Token::Comment(comment) => self.append_comment_to_tag(comment),
                 Token::Pi(pi) => self.append_pi_to_tag(pi),
+                Token::CData(contents) => self.append_cdata_to_tag(contents),
                 Token::Eof | Token::NullCharacter => {
                     XmlProcessResult::Reprocess(XmlPhase::End, Token::Eof)
                 },
@@ -759,10 +792,26 @@ where
             XmlPhase::End => match token {
                 Token::Comment(comment) => self.append_comment_to_doc(comment),
                 Token::Pi(pi) => self.append_pi_to_doc(pi),
+                // Character data is not allowed outside the document element,
+                // and a CDATA section is character data even when blank.
+                Token::CData(_) => {
+                    self.sink
+                        .parse_error(Borrowed("Unexpected CDATA section outside the document element"));
+                    XmlProcessResult::Done
+                }
                 Token::Characters(ref chars) if !any_not_whitespace(chars) => {
                     XmlProcessResult::Done
                 },
-                Token::Eof => self.stop_parsing(),
+                Token::Eof => {
+                    // An XML document with unclosed elements is not
+                    // well-formed: every start tag needs its end tag
+                    // (<https://www.w3.org/TR/xml/#sec-starttags>).
+                    if !self.no_open_elems() {
+                        self.sink
+                            .parse_error(Borrowed("Unexpected EOF with open elements"));
+                    }
+                    self.stop_parsing()
+                }
                 _ => {
                     self.sink
                         .parse_error(Borrowed("Unexpected element in end phase"));

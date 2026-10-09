@@ -24,6 +24,7 @@ pub enum Token {
     Tag(Tag),
     Doctype(Doctype),
     Comment(StrTendril),
+    CData(StrTendril),
     Characters(StrTendril),
     Pi(Pi),
     NullCharacter,

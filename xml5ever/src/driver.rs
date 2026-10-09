@@ -8,7 +8,7 @@
 // except according to those terms.
 
 use crate::tokenizer::{XmlTokenizer, XmlTokenizerOpts};
-use crate::tree_builder::{TreeSink, XmlTreeBuilder, XmlTreeBuilderOpts};
+use crate::tree_builder::{XmlTreeBuilder, XmlTreeBuilderOpts, XmlTreeSink};
 
 use std::borrow::Cow;
 
@@ -37,7 +37,7 @@ pub struct XmlParseOpts {
 /// ```
 pub fn parse_document<Sink>(sink: Sink, opts: XmlParseOpts) -> XmlParser<Sink>
 where
-    Sink: TreeSink,
+    Sink: XmlTreeSink,
 {
     let tb = XmlTreeBuilder::new(sink, opts.tree_builder);
     let tok = XmlTokenizer::new(tb, opts.tokenizer);
@@ -51,7 +51,7 @@ where
 /// ready to receive Unicode input through the `tendril::TendrilSink` trait’s methods.
 pub struct XmlParser<Sink>
 where
-    Sink: TreeSink,
+    Sink: XmlTreeSink,
 {
     /// Tokenizer used by XmlParser.
     pub tokenizer: XmlTokenizer<XmlTreeBuilder<Sink::Handle, Sink>>,
@@ -59,7 +59,7 @@ where
     pub input_buffer: BufferQueue,
 }
 
-impl<Sink: TreeSink> TendrilSink<tendril::fmt::UTF8> for XmlParser<Sink> {
+impl<Sink: XmlTreeSink> TendrilSink<tendril::fmt::UTF8> for XmlParser<Sink> {
     type Output = Sink::Output;
 
     fn process(&mut self, t: StrTendril) {
@@ -79,7 +79,7 @@ impl<Sink: TreeSink> TendrilSink<tendril::fmt::UTF8> for XmlParser<Sink> {
     }
 }
 
-impl<Sink: TreeSink> XmlParser<Sink> {
+impl<Sink: XmlTreeSink> XmlParser<Sink> {
     /// Wrap this parser into a `TendrilSink` that accepts UTF-8 bytes.
     ///
     /// Use this when your input is bytes that are known to be in the UTF-8 encoding.
