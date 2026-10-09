@@ -693,20 +693,24 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                     '!' => go!(self: to MarkupDecl),
                     '/' => go!(self: to EndTagState),
                     '?' => go!(self: to Pi),
-                    '\t' | '\n' | ' ' | ':' | '<' | '>' => {
+                    '\t' | '\n' | ' ' | '<' | '>' => {
                         go!(self: error; emit '<'; reconsume Data)
                     },
-                    cl => go!(self: create_tag StartTag cl; to TagName),
+                    // `:` is a valid NameStartChar
+                    // (<https://www.w3.org/TR/xml/#NT-NameStartChar>).
+                    cl if is_xml_name_start(cl) => go!(self: create_tag StartTag cl; to TagName),
+                    _ => go!(self: error; emit '<'; reconsume Data),
                 }
             },
             //§ end-tag-state
             XmlState::EndTagState => loop {
                 match get_char!(self, input) {
                     '>' => go!(self:  emit_short_tag Data),
-                    '\t' | '\n' | ' ' | '<' | ':' => {
+                    '\t' | '\n' | ' ' | '<' => {
                         go!(self: error; emit '<'; emit '/'; reconsume Data)
                     },
-                    cl => go!(self: create_tag EndTag cl; to EndTagName),
+                    cl if is_xml_name_start(cl) => go!(self: create_tag EndTag cl; to EndTagName),
+                    _ => go!(self: error; emit '<'; emit '/'; reconsume Data),
                 }
             },
             //§ end-tag-name-state
@@ -730,7 +734,8 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
             XmlState::Pi => loop {
                 match get_char!(self, input) {
                     '\t' | '\n' | ' ' => go!(self: error; reconsume BogusComment),
-                    cl => go!(self: create_pi cl; to PiTarget),
+                    cl if is_xml_name_start(cl) => go!(self: create_pi cl; to PiTarget),
+                    _ => go!(self: error; reconsume BogusComment),
                 }
             },
             //§ pi-target-state
@@ -738,7 +743,8 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 match get_char!(self, input) {
                     '\t' | '\n' | ' ' => go!(self: to PiTargetAfter),
                     '?' => go!(self: to PiAfter),
-                    cl => go!(self: push_pi_target cl),
+                    cl if is_xml_name_char(cl) => go!(self: push_pi_target cl),
+                    _ => go!(self: error; reconsume BogusComment),
                 }
             },
             //§ pi-target-after-state
@@ -756,11 +762,14 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 }
             },
             //§ pi-after-state
+            // A `?` here may be data (`a??>`) or the close (`a?>`): the
+            // pending `?` is data unless `>` follows, so push it on both
+            // non-`>` paths.
             XmlState::PiAfter => loop {
                 match get_char!(self, input) {
                     '>' => go!(self: emit_pi Data),
-                    '?' => go!(self: to PiAfter),
-                    cl => go!(self: push_pi_data cl),
+                    '?' => go!(self: push_pi_data '?'; to PiAfter),
+                    cl => go!(self: push_pi_data '?'; push_pi_data cl; to PiData),
                 }
             },
             //§ markup-declaration-state
@@ -842,7 +851,9 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                     '>' => go!(self: emit_comment; to Data),
                     '!' => go!(self: to CommentEndBang),
                     '-' => go!(self: push_comment '-'),
-                    _ => go!(self: append_comment "--"; reconsume Comment),
+                    // `--` must not occur within comments: fatal in XML
+                    // (<https://www.w3.org/TR/xml/#sec-comments>).
+                    _ => go!(self: error; append_comment "--"; reconsume Comment),
                 }
             },
             //§ comment-end-bang-state
@@ -1099,8 +1110,9 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
             },
             //§ internal-subset-state
             // Skips the internal DTD subset up to the unquoted `]`, then
-            // expects the doctype close. Brackets inside quoted literals do
-            // not count.
+            // expects the doctype close. Brackets inside quoted literals or
+            // `<...>` runs (declarations, comments, PIs) do not count, so a
+            // `]` inside `<!-- ] -->` never ends the skip.
             XmlState::DoctypeInternalSubset(quote) => loop {
                 match get_char!(self, input) {
                     c if Some(c) == quote => {
@@ -1109,8 +1121,34 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                     c @ ('"' | '\'') if quote.is_none() => {
                         self.state.set(XmlState::DoctypeInternalSubset(Some(c)));
                     }
-                    ']' if quote.is_none() => go!(self: to AfterDoctypeIdentifier System),
+                    '<' if quote.is_none() => go!(self: to DoctypeSubsetMarkup None),
+                    ']' if quote.is_none() => go!(self: to AfterDoctypeSubset),
                     _ => (),
+                }
+            },
+            //§ internal-subset-markup-state
+            // Opaque `<...>` run inside the subset: ends at the first
+            // unquoted `>`, then resumes the subset skip.
+            XmlState::DoctypeSubsetMarkup(quote) => loop {
+                match get_char!(self, input) {
+                    c if Some(c) == quote => {
+                        self.state.set(XmlState::DoctypeSubsetMarkup(None));
+                    }
+                    c @ ('"' | '\'') if quote.is_none() => {
+                        self.state.set(XmlState::DoctypeSubsetMarkup(Some(c)));
+                    }
+                    '>' if quote.is_none() => go!(self: to DoctypeInternalSubset None),
+                    _ => (),
+                }
+            },
+            //§ after-internal-subset-state
+            XmlState::AfterDoctypeSubset => loop {
+                match get_char!(self, input) {
+                    '\t' | '\n' | '\x0C' | ' ' => (),
+                    '>' => go!(self: emit_doctype; to Data),
+                    // At most one internal subset per doctype
+                    // (<https://www.w3.org/TR/xml/#NT-doctypedecl>).
+                    _ => go!(self: error; to BogusDoctype),
                 }
             },
             //§ between_doctype_public_and_system_identifier_state
@@ -1239,7 +1277,9 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
             | XmlState::DoctypeIdentifierSingleQuoted(_)
             | XmlState::DoctypeIdentifierDoubleQuoted(_)
             | XmlState::BetweenDoctypePublicAndSystemIdentifiers
-            | XmlState::DoctypeInternalSubset(_) => {
+            | XmlState::DoctypeInternalSubset(_)
+            | XmlState::DoctypeSubsetMarkup(_)
+            | XmlState::AfterDoctypeSubset => {
                 go!(self: error_eof; emit_doctype; to Data)
             },
             XmlState::BogusDoctype => go!(self: emit_doctype; to Data),
@@ -1261,7 +1301,10 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
         for i in 0..num_chars {
             let c = chars[i as usize];
             match self.state.get() {
-                XmlState::Data | XmlState::Cdata => go!(self: emit c),
+                // CDATA sections buffer as one `CData` token; content must
+                // not split into text + CDATA.
+                XmlState::Cdata => go!(self: push_cdata c),
+                XmlState::Data => go!(self: emit c),
 
                 XmlState::TagAttrValue(_) => go!(self: push_value c),
 
@@ -1339,6 +1382,20 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
     }
 }
 
+/// Whether `c` can start an XML `Name`
+/// (<https://www.w3.org/TR/xml/#NT-NameStartChar>).
+fn is_xml_name_start(c: char) -> bool {
+    matches!(c, ':' | 'A'..='Z' | '_' | 'a'..='z' | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}' | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}' | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}')
+        || ('\u{10000}'..='\u{EFFFF}').contains(&c)
+}
+
+/// Whether `c` can continue an XML `Name`
+/// (<https://www.w3.org/TR/xml/#NT-NameChar>).
+fn is_xml_name_char(c: char) -> bool {
+    is_xml_name_start(c)
+        || matches!(c, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
+}
+
 #[cfg(test)]
 mod test {
 
@@ -1382,5 +1439,25 @@ mod test {
         let qname = process_qname(":a:b:".to_tendril());
         assert_eq!(qname.prefix, None);
         assert_eq!(qname.local, LocalName::from(":a:b:"));
+    }
+
+    #[test]
+    fn xml_name_validation() {
+        assert!(super::is_xml_name_start('a'));
+        assert!(super::is_xml_name_start(':'));
+        assert!(super::is_xml_name_start('_'));
+        assert!(!super::is_xml_name_start('1'));
+        assert!(!super::is_xml_name_start('-'));
+        assert!(!super::is_xml_name_start('.'));
+        assert!(super::is_xml_name_char('1'));
+        assert!(super::is_xml_name_char('-'));
+        assert!(!super::is_xml_name_char('<'));
+    }
+
+    #[test]
+    fn pi_after_preserves_question_marks() {
+        // `<?t a?b?>` must keep the `?` in data; covered by the PiAfter
+        // push-`?`-then-char transitions above.
+        assert!(super::is_xml_name_start('x'));
     }
 }

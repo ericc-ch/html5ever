@@ -149,9 +149,19 @@ pub enum XmlState {
     BetweenDoctypePublicAndSystemIdentifiers,
     /// Indicates that the parser is skipping the internal DTD subset of a
     /// doctype (`[...]`). The subset is not processed (entity expansion
-    /// happens up front); quoted brackets do not end the skip. Carries the
-    /// open quote, if any.
+    /// happens up front); quoted brackets do not end the skip. `<...>` runs
+    /// (declarations, comments, PIs) are skipped opaquely so a `]` inside
+    /// them never ends the subset. Carries the open quote, if any.
     DoctypeInternalSubset(Option<char>),
+    /// Indicates that the parser is skipping a `<...>` run inside the
+    /// internal subset (declaration, comment, or PI). Carries the open
+    /// quote, if any; the run ends at the first unquoted `>`.
+    DoctypeSubsetMarkup(Option<char>),
+    /// Indicates that the parser has finished the internal subset and now
+    /// expects only whitespace or `>`: a second `[` here is a
+    /// well-formedness violation
+    /// (<https://www.w3.org/TR/xml/#NT-doctypedecl>).
+    AfterDoctypeSubset,
     /// Indicates that the parser is currently parsing an ill-formed document type defintion, such as
     /// `<!DOCTYPE html what-is-this>`.
     BogusDoctype,

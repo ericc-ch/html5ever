@@ -589,6 +589,15 @@ impl TreeSink for RcDom {
     }
 }
 
+impl xml5ever::tree_builder::XmlTreeSink for RcDom {
+    // Reference DOM has no CDATA node kind: map sections to text, like HTML.
+    fn create_cdata_section(&self, contents: StrTendril) -> Self::Handle {
+        Node::new(NodeData::Text {
+            contents: RefCell::new(contents),
+        })
+    }
+}
+
 impl Default for RcDom {
     fn default() -> RcDom {
         RcDom {
