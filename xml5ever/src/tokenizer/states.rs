@@ -147,6 +147,11 @@ pub enum XmlState {
     /// Indicates that the parser has finished parsing a public identifier and now expects
     /// a system identifier.
     BetweenDoctypePublicAndSystemIdentifiers,
+    /// Indicates that the parser is skipping the internal DTD subset of a
+    /// doctype (`[...]`). The subset is not processed (entity expansion
+    /// happens up front); quoted brackets do not end the skip. Carries the
+    /// open quote, if any.
+    DoctypeInternalSubset(Option<char>),
     /// Indicates that the parser is currently parsing an ill-formed document type defintion, such as
     /// `<!DOCTYPE html what-is-this>`.
     BogusDoctype,

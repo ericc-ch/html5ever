@@ -1005,6 +1005,11 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 } else {
                     match get_char!(self, input) {
                         '\t' | '\n' | '\x0C' | ' ' => (),
+                        // An internal subset follows the name (and any
+                        // external ids): skip it; entity expansion already
+                        // ran up front
+                        // (<https://www.w3.org/TR/xml/#NT-doctypedecl>).
+                        '[' => go!(self: to DoctypeInternalSubset None),
                         '>' => go!(self: emit_doctype; to Data),
                         _ => go!(self: error; to BogusDoctype),
                     }
@@ -1087,8 +1092,25 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
             XmlState::AfterDoctypeIdentifier(System) => loop {
                 match get_char!(self, input) {
                     '\t' | '\n' | '\x0C' | ' ' => (),
+                    '[' => go!(self: to DoctypeInternalSubset None),
                     '>' => go!(self: emit_doctype; to Data),
                     _ => go!(self: error; to BogusDoctype),
+                }
+            },
+            //§ internal-subset-state
+            // Skips the internal DTD subset up to the unquoted `]`, then
+            // expects the doctype close. Brackets inside quoted literals do
+            // not count.
+            XmlState::DoctypeInternalSubset(quote) => loop {
+                match get_char!(self, input) {
+                    c if Some(c) == quote => {
+                        self.state.set(XmlState::DoctypeInternalSubset(None));
+                    }
+                    c @ ('"' | '\'') if quote.is_none() => {
+                        self.state.set(XmlState::DoctypeInternalSubset(Some(c)));
+                    }
+                    ']' if quote.is_none() => go!(self: to AfterDoctypeIdentifier System),
+                    _ => (),
                 }
             },
             //§ between_doctype_public_and_system_identifier_state
@@ -1216,7 +1238,8 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
             | XmlState::AfterDoctypeIdentifier(_)
             | XmlState::DoctypeIdentifierSingleQuoted(_)
             | XmlState::DoctypeIdentifierDoubleQuoted(_)
-            | XmlState::BetweenDoctypePublicAndSystemIdentifiers => {
+            | XmlState::BetweenDoctypePublicAndSystemIdentifiers
+            | XmlState::DoctypeInternalSubset(_) => {
                 go!(self: error_eof; emit_doctype; to Data)
             },
             XmlState::BogusDoctype => go!(self: emit_doctype; to Data),
