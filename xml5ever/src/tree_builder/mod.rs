@@ -687,8 +687,11 @@ where
                     XmlProcessResult::Done
                 },
                 Token::Eof => {
-                    self.sink
-                        .parse_error(Borrowed("Unexpected EOF in start phase"));
+                    // A document with no root element is not reported: DOM
+                    // parsers accept prolog-only input (comments, PIs, empty
+                    // input) without a parsererror document, and only
+                    // tokenizer-level violations are fatal. An unclosed root
+                    // is still caught in the end phase via open elements.
                     XmlProcessResult::Reprocess(XmlPhase::End, Token::Eof)
                 },
                 Token::Doctype(d) => {
