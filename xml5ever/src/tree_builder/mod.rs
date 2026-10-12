@@ -687,11 +687,11 @@ where
                     XmlProcessResult::Done
                 },
                 Token::Eof => {
-                    // A document with no root element is not reported: DOM
-                    // parsers accept prolog-only input (comments, PIs, empty
-                    // input) without a parsererror document, and only
-                    // tokenizer-level violations are fatal. An unclosed root
-                    // is still caught in the end phase via open elements.
+                    // End of input before the root element: a document needs
+                    // exactly one root (<https://www.w3.org/TR/xml/#NT-document>),
+                    // so empty and prolog-only input are not well-formed.
+                    self.sink
+                        .parse_error(Borrowed("Unexpected EOF in start phase"));
                     XmlProcessResult::Reprocess(XmlPhase::End, Token::Eof)
                 },
                 Token::Doctype(d) => {
@@ -822,5 +822,97 @@ where
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NodeOrText, TreeSink, XmlTreeSink};
+    use crate::driver::parse_document;
+    use crate::interface::{Attribute, ElementFlags, QualName, QuirksMode};
+    use crate::tendril::{StrTendril, TendrilSink};
+    use std::borrow::Cow;
+    use std::cell::{Ref, RefCell};
+
+    /// A sink that keeps element names (so the tree builder can ask for
+    /// them) and counts parse errors; every other node is an opaque index.
+    #[derive(Default)]
+    struct ErrorCount {
+        names: RefCell<Vec<Option<QualName>>>,
+        errors: RefCell<Vec<Cow<'static, str>>>,
+    }
+
+    impl ErrorCount {
+        fn node(&self, name: Option<QualName>) -> usize {
+            let mut names = self.names.borrow_mut();
+            names.push(name);
+            names.len()
+        }
+    }
+
+    impl TreeSink for ErrorCount {
+        type Handle = usize;
+        type Output = Vec<Cow<'static, str>>;
+        type ElemName<'a> = Ref<'a, QualName>;
+
+        fn finish(self) -> Self::Output {
+            self.errors.into_inner()
+        }
+        fn parse_error(&self, msg: Cow<'static, str>) {
+            self.errors.borrow_mut().push(msg);
+        }
+        fn get_document(&self) -> usize {
+            0
+        }
+        fn elem_name<'a>(&'a self, target: &'a usize) -> Ref<'a, QualName> {
+            Ref::map(self.names.borrow(), |names| {
+                names[*target - 1].as_ref().expect("element handle")
+            })
+        }
+        fn create_element(&self, name: QualName, _: Vec<Attribute>, _: ElementFlags) -> usize {
+            self.node(Some(name))
+        }
+        fn create_comment(&self, _: StrTendril) -> usize {
+            self.node(None)
+        }
+        fn create_pi(&self, _: StrTendril, _: StrTendril) -> usize {
+            self.node(None)
+        }
+        fn append(&self, _: &usize, _: NodeOrText<usize>) {}
+        fn append_based_on_parent_node(&self, _: &usize, _: &usize, _: NodeOrText<usize>) {}
+        fn append_doctype_to_document(&self, _: StrTendril, _: StrTendril, _: StrTendril) {}
+        fn get_template_contents(&self, target: &usize) -> usize {
+            *target
+        }
+        fn same_node(&self, x: &usize, y: &usize) -> bool {
+            x == y
+        }
+        fn set_quirks_mode(&self, _: QuirksMode) {}
+        fn append_before_sibling(&self, _: &usize, _: NodeOrText<usize>) {}
+        fn add_attrs_if_missing(&self, _: &usize, _: Vec<Attribute>) {}
+        fn remove_from_parent(&self, _: &usize) {}
+        fn reparent_children(&self, _: &usize, _: &usize) {}
+    }
+
+    impl XmlTreeSink for ErrorCount {
+        fn create_cdata_section(&self, _: StrTendril) -> usize {
+            self.node(None)
+        }
+    }
+
+    fn errors(input: &str) -> Vec<Cow<'static, str>> {
+        parse_document(ErrorCount::default(), Default::default()).one(input)
+    }
+
+    #[test]
+    fn rootless_documents_are_not_well_formed() {
+        for input in ["", "  ", "<!-- c -->", "<?pi data?>", "<!DOCTYPE r>"] {
+            assert!(
+                errors(input).contains(&Cow::Borrowed("Unexpected EOF in start phase")),
+                "{input:?}: {:?}",
+                errors(input)
+            );
+        }
+        assert_eq!(errors("<!-- c --><r/>"), Vec::<Cow<'static, str>>::new());
     }
 }
