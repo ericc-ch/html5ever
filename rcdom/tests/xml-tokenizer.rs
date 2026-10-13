@@ -293,8 +293,10 @@ fn json_to_tokens(js: &Value, exact_errors: bool) -> Vec<Token> {
 ///   §2.5 makes both well-formedness errors, and we report them;
 /// - `PUBLIC` external ids without a system literal: `ExternalID` requires
 ///   both literals (XML 1.0 §2.8);
-/// - `?` in a PI target (not a `NameStartChar`) and `:` rejected as a tag-name
-///   start (but `:` *is* a `NameStartChar`): both follow XML 1.0 §2.3;
+/// - `?` in a PI target: not a `NameStartChar`, so we report it while the
+///   corpus accepts it; `:` as a tag-name start: `:` *is* a `NameStartChar`
+///   (XML 1.0 §2.3), so we open a tag where the corpus reports an error and
+///   prints `<:` as characters;
 /// - CDATA content: buffered into `Token::CData` so the tree builder can build
 ///   a real CDATA section node instead of character data;
 /// - the draft's "PI after state" throws away a '?' that turns out not to be

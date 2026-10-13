@@ -5,9 +5,10 @@
 //! spliced into the source so the XML parser builds the corresponding nodes
 //! (<https://www.w3.org/TR/xml/#intern-replacement>).
 //!
-//! Includes internal general entities in the document instance. External and
-//! parameter entities stay unresolved: referencing one is a well-formedness
-//! violation and surfaces as a parse error (see `errors` out-param).
+//! Includes the internal general entities declared in the document instance.
+//! External general entities are never included; a reference to one reports an
+//! error. Parameter entities are not processed, so their references stay
+//! literal.
 //!
 //! Billion-laughs protection: entity expansion is bounded three ways.
 //! Declaration count caps HashMap memory; depth caps the call stack
@@ -44,14 +45,14 @@ pub(crate) fn expand_internal_general_entities(
     let mut output = String::with_capacity(input.len());
     output.push_str(&input[..body_start]);
     let mut budget = MAX_EXPANDED_BYTES;
-    expand_content(
+    let completed = expand_content(
         &input[body_start..],
         &entities,
         &mut output,
         &mut budget,
         &mut errors,
     );
-    if budget == 0 {
+    if !completed {
         report(
             &mut errors,
             format_args!("entity expansion budget exhausted"),
@@ -333,18 +334,92 @@ fn parse_general_entity_decl(decl: &str) -> (usize, Option<(String, String)>) {
     (consumed, None)
 }
 
-/// Copies `text` into `output` while budget remains. Returns false when the
-/// budget ran out, telling the caller to copy the rest literally and stop
-/// expanding. `take` is floored to a char boundary so multi-byte text near
-/// exhaustion cannot panic.
+/// Copies `text` into `output` when the remaining budget covers it. Returns
+/// false without writing anything when it does not, so an oversized
+/// replacement is never half-copied into the tree; the caller stops and the
+/// top level reports the exhaustion.
 fn push_budgeted(output: &mut String, text: &str, budget: &mut usize) -> bool {
-    let mut take = (*budget).min(text.len());
-    while take > 0 && !text.is_char_boundary(take) {
-        take -= 1;
+    if text.len() > *budget {
+        return false;
     }
-    output.push_str(&text[..take]);
-    *budget -= take;
-    take == text.len()
+    output.push_str(text);
+    *budget -= text.len();
+    true
+}
+
+/// How one `&...;` reference resolved.
+enum RefExpansion {
+    /// The reference was expanded; the caller advances by this many bytes.
+    Consumed(usize),
+    /// Not an internal general entity; the caller copies the `&` literally.
+    Literal,
+    /// The budget ran out; the caller stops and fails closed.
+    Exhausted,
+}
+
+/// Decodes the character references an attribute literal would decode, so the
+/// result can be re-encoded for the literal's delimiter without changing its
+/// value (<https://www.w3.org/TR/xml/#AVNormalize>). Anything that is not a
+/// well-formed character or predefined reference stays literal.
+fn decode_char_refs(text: &str) -> Cow<'_, str> {
+    if !text.contains('&') {
+        return Cow::Borrowed(text);
+    }
+    let mut decoded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        decoded.push_str(&rest[..amp]);
+        let candidate = &rest[amp..];
+        let replacement = candidate.find(';').and_then(|semi| {
+            let body = &candidate[1..semi];
+            let character = match body {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "apos" => Some('\''),
+                "quot" => Some('"'),
+                _ => body
+                    .strip_prefix('#')
+                    .and_then(|digits| match digits.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                        None => digits.parse::<u32>().ok(),
+                    })
+                    .and_then(char::from_u32),
+            };
+            character.map(|character| (character, semi + 1))
+        });
+        match replacement {
+            Some((character, consumed)) => {
+                decoded.push(character);
+                rest = &candidate[consumed..];
+            }
+            None => {
+                decoded.push('&');
+                rest = &candidate[1..];
+            }
+        }
+    }
+    decoded.push_str(rest);
+    Cow::Owned(decoded)
+}
+
+/// Writes `text` into a quoted attribute literal: `&` and the active quote
+/// become character references, so replacement text cannot start a new
+/// reference or end the literal early
+/// (<https://www.w3.org/TR/xml/#AVNormalize>).
+fn push_literal(output: &mut String, text: &str, quote: char, budget: &mut usize) -> bool {
+    let decoded = decode_char_refs(text);
+    let mut encoded = String::with_capacity(decoded.len());
+    for character in decoded.chars() {
+        if character == '&' {
+            encoded.push_str("&amp;");
+        } else if character == quote {
+            encoded.push_str(if character == '"' { "&#34;" } else { "&#39;" });
+        } else {
+            encoded.push(character);
+        }
+    }
+    push_budgeted(output, &encoded, budget)
 }
 
 fn expand_content(
@@ -353,9 +428,10 @@ fn expand_content(
     output: &mut String,
     budget: &mut usize,
     errors: &mut Vec<String>,
-) {
+) -> bool {
     let mut pos = 0;
     while pos < content.len() {
+        let mark = output.len();
         let rest = &content[pos..];
         if rest.starts_with("<!--") || rest.starts_with("<![CDATA[") || rest.starts_with("<?") {
             let consumed = if rest.starts_with("<!--") {
@@ -366,8 +442,9 @@ fn expand_content(
                 rest.find("?>").map_or(rest.len(), |end| end + 2)
             };
             if !push_budgeted(output, &rest[..consumed], budget) {
-                output.push_str(&content[pos + consumed..]);
-                return;
+                output.truncate(mark);
+                output.push_str(&content[pos..]);
+                return false;
             }
             pos += consumed;
             continue;
@@ -375,42 +452,54 @@ fn expand_content(
         if rest.starts_with('<') {
             let consumed = skip_markup(rest);
             if !expand_tag(&rest[..consumed], entities, output, budget, errors) {
-                output.push_str(&content[pos + consumed..]);
-                return;
+                output.truncate(mark);
+                output.push_str(&content[pos..]);
+                return false;
             }
             pos += consumed;
             continue;
         }
         if rest.starts_with('&') {
-            if let Some(consumed) = expand_entity_ref(rest, entities, output, budget, errors, 0) {
-                pos += consumed;
-            } else {
-                // Malformed references stay literal here; the XML tokenizer's
-                // char-ref path reports the well-formedness error downstream.
-                // Undefined valid-shaped `&name;` already pushed an error.
-                if !push_budgeted(output, "&", budget) {
-                    output.push_str(&content[pos + 1..]);
-                    return;
+            match expand_entity_ref(rest, entities, output, budget, errors, 0) {
+                RefExpansion::Consumed(consumed) => pos += consumed,
+                RefExpansion::Literal => {
+                    // Malformed references stay literal here; the XML
+                    // tokenizer's char-ref path reports the well-formedness
+                    // error downstream. Undefined valid-shaped `&name;`
+                    // already pushed an error.
+                    if !push_budgeted(output, "&", budget) {
+                        output.truncate(mark);
+                        output.push_str(&content[pos..]);
+                        return false;
+                    }
+                    pos += 1;
                 }
-                pos += 1;
+                RefExpansion::Exhausted => {
+                    output.truncate(mark);
+                    output.push_str(&content[pos..]);
+                    return false;
+                }
             }
             continue;
         }
         let next = rest.find(['<', '&']).unwrap_or(rest.len());
         if !push_budgeted(output, &rest[..next], budget) {
-            output.push_str(&content[pos + next..]);
-            return;
+            output.truncate(mark);
+            output.push_str(&content[pos..]);
+            return false;
         }
         pos += next;
     }
+    true
 }
 
 /// Copies a tag verbatim while expanding entity references inside quoted
-/// attribute values (<https://www.w3.org/TR/xml/#AVNormalize>). Markup in
-/// replacement text is *not* re-tokenized here: attribute values cannot
-/// contain `<` (<https://www.w3.org/TR/xml/#forbidden>), and a `<`-bearing
-/// value stays literal for the tokenizer to reject. Returns false when the
-/// budget ran out.
+/// attribute values (<https://www.w3.org/TR/xml/#AVNormalize>). A reference's
+/// replacement is re-encoded for the literal, so its quotes and ampersands
+/// cannot re-delimit the value. Markup in replacement text is *not*
+/// re-tokenized here: attribute values cannot contain `<`
+/// (<https://www.w3.org/TR/xml/#forbidden>), and a `<`-bearing value stays
+/// literal for the tokenizer to reject. Returns false when the budget ran out.
 fn expand_tag(
     tag: &str,
     entities: &HashMap<String, String>,
@@ -431,18 +520,26 @@ fn expand_tag(
                 if !push_budgeted(output, &tag[text_start..i], budget) {
                     return false;
                 }
-                if let Some(consumed) = expand_entity_ref(rest, entities, output, budget, errors, 0)
-                {
-                    i += consumed;
-                    text_start = i;
-                    continue;
+                let mut expanded = String::new();
+                match expand_entity_ref(rest, entities, &mut expanded, budget, errors, 0) {
+                    RefExpansion::Consumed(consumed) => {
+                        if !push_literal(output, &expanded, q, budget) {
+                            return false;
+                        }
+                        i += consumed;
+                        text_start = i;
+                        continue;
+                    }
+                    RefExpansion::Literal => {
+                        if !push_budgeted(output, "&", budget) {
+                            return false;
+                        }
+                        i += 1;
+                        text_start = i;
+                        continue;
+                    }
+                    RefExpansion::Exhausted => return false,
                 }
-                if !push_budgeted(output, "&", budget) {
-                    return false;
-                }
-                i += 1;
-                text_start = i;
-                continue;
             }
             i += c.len_utf8();
             continue;
@@ -462,32 +559,38 @@ fn expand_entity_ref(
     budget: &mut usize,
     errors: &mut Vec<String>,
     depth: usize,
-) -> Option<usize> {
-    let body = rest.strip_prefix('&')?;
+) -> RefExpansion {
+    let Some(body) = rest.strip_prefix('&') else {
+        return RefExpansion::Literal;
+    };
     if body.starts_with('#') {
-        return None;
+        return RefExpansion::Literal;
     }
-    let name_end = body.find(';')?;
+    let Some(name_end) = body.find(';') else {
+        return RefExpansion::Literal;
+    };
     let name = &body[..name_end];
     if !is_valid_name(name) {
-        return None;
+        return RefExpansion::Literal;
     }
     if is_predefined_entity(name) {
-        return None;
+        return RefExpansion::Literal;
     }
     let Some(value) = entities.get(name).cloned() else {
         // Undeclared general entity: well-formedness violation, fail closed
         // (<https://www.w3.org/TR/xml/#sec-references>).
         report(errors, format_args!("undefined entity &{name};"));
-        return None;
+        return RefExpansion::Literal;
     };
     // Each top-level reference gets a fresh cycle set; it guards only within
     // one expansion, so diamond (non-cyclic) sharing across siblings
     // re-expands from scratch and the output budget (not `seen`) bounds it.
     let mut seen = HashSet::new();
     seen.insert(name.to_owned());
-    expand_replacement(&value, entities, output, budget, errors, &mut seen, depth);
-    Some(name_end + 2)
+    if !expand_replacement(&value, entities, output, budget, errors, &mut seen, depth) {
+        return RefExpansion::Exhausted;
+    }
+    RefExpansion::Consumed(name_end + 2)
 }
 
 fn expand_replacement(
@@ -498,35 +601,38 @@ fn expand_replacement(
     errors: &mut Vec<String>,
     seen: &mut HashSet<String>,
     depth: usize,
-) {
+) -> bool {
     // The value is cloned at the call site so `entities` is never borrowed
     // while `output` grows; replacement text only ever appends.
     let mut pos = 0;
     while pos < value.len() {
         if *budget == 0 {
-            return;
+            return false;
         }
         let rest = &value[pos..];
         if let Some(amp) = rest.find('&') {
             if !push_budgeted(output, &rest[..amp], budget) {
-                return;
+                return false;
             }
             let ref_rest = &rest[amp..];
-            if let Some(consumed) =
-                expand_nested_ref(ref_rest, entities, output, budget, errors, seen, depth)
-            {
-                pos += amp + consumed;
-            } else {
-                if !push_budgeted(output, "&", budget) {
-                    return;
+            match expand_nested_ref(ref_rest, entities, output, budget, errors, seen, depth) {
+                RefExpansion::Consumed(consumed) => pos += amp + consumed,
+                RefExpansion::Literal => {
+                    if !push_budgeted(output, "&", budget) {
+                        return false;
+                    }
+                    pos += amp + 1;
                 }
-                pos += amp + 1;
+                RefExpansion::Exhausted => return false,
             }
         } else {
-            push_budgeted(output, rest, budget);
+            if !push_budgeted(output, rest, budget) {
+                return false;
+            }
             break;
         }
     }
+    true
 }
 
 fn expand_nested_ref(
@@ -537,12 +643,16 @@ fn expand_nested_ref(
     errors: &mut Vec<String>,
     seen: &mut HashSet<String>,
     depth: usize,
-) -> Option<usize> {
-    let body = rest.strip_prefix('&')?;
+) -> RefExpansion {
+    let Some(body) = rest.strip_prefix('&') else {
+        return RefExpansion::Literal;
+    };
     if body.starts_with('#') {
-        return None;
+        return RefExpansion::Literal;
     }
-    let name_end = body.find(';')?;
+    let Some(name_end) = body.find(';') else {
+        return RefExpansion::Literal;
+    };
     let name = &body[..name_end];
     // Depth caps the call stack; the `seen` set still rejects cycles below it.
     // The budget covers output bytes (via `push_budgeted`), but each nested
@@ -550,27 +660,30 @@ fn expand_nested_ref(
     // allocation per reference), so every expansion prepays a flat overhead:
     // without it an attacker trades bounded output for unbounded CPU.
     if *budget == 0 || !is_valid_name(name) || is_predefined_entity(name) {
-        return None;
+        return RefExpansion::Literal;
     }
     if depth >= MAX_ENTITY_DEPTH {
         report(
             errors,
             format_args!("entity nesting deeper than {MAX_ENTITY_DEPTH} at &{name};"),
         );
-        return None;
+        return RefExpansion::Literal;
     }
     let Some(value) = entities.get(name).cloned() else {
         report(errors, format_args!("undefined entity &{name};"));
-        return None;
+        return RefExpansion::Literal;
     };
     if !seen.insert(name.to_owned()) {
         report(errors, format_args!("cyclic entity &{name};"));
-        return None;
+        return RefExpansion::Literal;
     }
     *budget = budget.saturating_sub(MAX_ENTITY_OVERHEAD);
-    expand_replacement(&value, entities, output, budget, errors, seen, depth + 1);
+    let completed = expand_replacement(&value, entities, output, budget, errors, seen, depth + 1);
     seen.remove(name);
-    Some(name_end + 2)
+    if !completed {
+        return RefExpansion::Exhausted;
+    }
+    RefExpansion::Consumed(name_end + 2)
 }
 
 fn skip_decl_body(decl: &str) -> usize {
@@ -792,6 +905,40 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(10),
             "expansion took too long: {elapsed:?}"
+        );
+    }
+
+    // A replacement containing the literal's own delimiter must not split the
+    // attribute in two; it is re-encoded as character references.
+    #[test]
+    fn quote_in_replacement_cannot_re_delimit_a_literal() {
+        let input = doctype_with("<!ENTITY q '\" b=\"c'>", "<r a=\"&q;\"/>");
+        let expanded = expand(&input);
+        assert!(
+            expanded.contains("a=\"&#34; b=&#34;c\""),
+            "literal not encoded: {expanded:?}"
+        );
+    }
+
+    // A decoded ampersand must stay data, not start a new reference.
+    #[test]
+    fn ampersand_in_replacement_stays_literal_in_attributes() {
+        let input = doctype_with("<!ENTITY q \"&#38;\">", "<r a=\"&q;\"/>");
+        let expanded = expand(&input);
+        assert!(
+            expanded.contains("a=\"&amp;\""),
+            "ampersand not encoded: {expanded:?}"
+        );
+    }
+
+    // Predefined references the tokenizer resolves are left alone.
+    #[test]
+    fn predefined_references_in_literals_stay_unchanged() {
+        let input = doctype_with("", "<r a=\"&amp;&#38;\"/>");
+        let expanded = expand(&input);
+        assert!(
+            expanded.contains("a=\"&amp;&#38;\""),
+            "predefined reference rewritten: {expanded:?}"
         );
     }
 }

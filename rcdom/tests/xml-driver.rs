@@ -99,3 +99,17 @@ fn assert_serialization(text: &'static str, dom: RcDom) {
     serialize::serialize(&mut serialized, &document, Default::default()).unwrap();
     assert_eq!(String::from_utf8(serialized).unwrap(), text);
 }
+
+#[test]
+fn expanding_driver_reports_entity_errors() {
+    let dom = driver::parse_document_expanding_entities(
+        RcDom::default(),
+        Default::default(),
+        "<!DOCTYPE r [<!ENTITY e \"x\">]><r>&e;&missing;</r>",
+    );
+    let errors = dom.errors.borrow();
+    assert!(
+        errors.iter().any(|error| error.contains("missing")),
+        "expected an undefined-entity error, got {errors:?}"
+    );
+}
