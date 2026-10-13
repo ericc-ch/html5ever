@@ -28,6 +28,9 @@ impl TokenSink for SimpleTokenPrinter {
             Token::Characters(b) => {
                 println!("TEXT: {}", &*b);
             },
+            Token::CData(content) => {
+                println!("CDATA: {content}");
+            },
             Token::NullCharacter => print!("NULL"),
             Token::Tag(tag) => {
                 println!("{:?} {} ", tag.kind, &*tag.name.local);

@@ -285,13 +285,50 @@ fn json_to_tokens(js: &Value, exact_errors: bool) -> Vec<Token> {
 
 /// Descriptions of xml5lib tests that we do not run.
 ///
-/// The XML5 draft's "PI after state" throws away a '?' that turns out not to be
-/// the start of a '?>', instead of treating it as ordinary data. XML 1.0 §2.6
-/// says a processing instruction runs up to the first '?>', so such a '?'
-/// belongs in the data, and that is what libxml2 and other parsers produce.
-/// This test bakes in the draft's behaviour, so it disagrees with us now that
-/// we keep the character. See https://github.com/servo/html5ever/issues/774
-const IGNORED_TESTS: &[&str] = &["PI tag with char in PiAfter state"];
+/// The corpus bakes the XML5 draft, which is looser than XML 1.0 in places
+/// this fork deliberately tightens, and it predates this fork's `Token::CData`.
+/// Skipped groups:
+///
+/// - `--` inside a comment and comments left unterminated at EOF: XML 1.0
+///   §2.5 makes both well-formedness errors, and we report them;
+/// - `PUBLIC` external ids without a system literal: `ExternalID` requires
+///   both literals (XML 1.0 §2.8);
+/// - `?` in a PI target (not a `NameStartChar`) and `:` rejected as a tag-name
+///   start (but `:` *is* a `NameStartChar`): both follow XML 1.0 §2.3;
+/// - CDATA content: buffered into `Token::CData` so the tree builder can build
+///   a real CDATA section node instead of character data;
+/// - the draft's "PI after state" throws away a '?' that turns out not to be
+///   the start of a '?>', instead of treating it as ordinary data. XML 1.0
+///   §2.6 says a processing instruction runs up to the first '?>', so such a
+///   '?' belongs in the data, and that is what libxml2 and other parsers
+///   produce. This test bakes in the draft's behaviour, so it disagrees with
+///   us now that we keep the character.
+///   See https://github.com/servo/html5ever/issues/774
+const IGNORED_TESTS: &[&str] = &[
+    // XML 1.0 well-formedness errors the draft accepts.
+    "--Comment",
+    "--Comment-",
+    "Comments 4",
+    "EOF inside comment 15",
+    "<!-- inside comment 14",
+    "<!-- inside comment 15",
+    "<!-- inside comment 16",
+    "<!-- inside comment 4",
+    "<!-- inside comment 5",
+    "<!-- inside comment 6",
+    "<!-- inside comment 7",
+    "<!DOCTYPE a PUBLIC''>",
+    "<!DOCTYPEa PUBLIC''>",
+    "<!DOCTYPE xhtml with public id>",
+    "PI tag with '?' in target",
+    "Tag state Error :",
+    // CDATA buffered into Token::CData.
+    "CDATA state",
+    "CDATA bracket text state",
+    "CDATA bracket state EOF with chars",
+    // The draft's PI-after behaviour described above.
+    "PI tag with char in PiAfter state",
+];
 
 fn mk_xml_test(
     name: String,
