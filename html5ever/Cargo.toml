@@ -17,7 +17,7 @@ trace_tokenizer = []
 serde = ["markup5ever/serde"]
 
 [dependencies]
-markup5ever = { workspace = true }
+markup5ever = "0.40"
 memchr = { workspace = true }
 log = { workspace = true }
 

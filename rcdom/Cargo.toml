@@ -17,8 +17,8 @@ path = "lib.rs"
 
 [dependencies]
 html5ever = { workspace = true }
-markup5ever = { workspace = true, features = ["serde"] }
-tendril = { workspace = true }
+markup5ever = { version = "0.40", features = ["serde"] }
+tendril = "0.5"
 xml5ever = { workspace = true }
 
 [dev-dependencies]
