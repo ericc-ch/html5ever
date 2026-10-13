@@ -9,6 +9,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 
 [lib]
@@ -21,9 +22,14 @@ tendril = { workspace = true }
 xml5ever = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 env_logger = { workspace = true }
 libtest-mimic = { workspace = true }
 serde_json = { workspace = true }
+
+[[bench]]
+name = "deserialize-serialize"
+harness = false
 
 [[test]]
 name = "html-tokenizer"

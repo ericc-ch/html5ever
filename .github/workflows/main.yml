@@ -15,7 +15,7 @@ jobs:
       matrix:
         version: [stable, beta]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set toolchain
         run: |
@@ -38,7 +38,7 @@ jobs:
     name: Cargo doc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set toolchain
         run: |
           rustup set profile minimal
@@ -51,7 +51,7 @@ jobs:
     name: Bench html5ever
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cargo bench -p html5ever
         env:
           RUSTFLAGS: --cfg bench
@@ -60,24 +60,54 @@ jobs:
     name: Bench tendril
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: cargo bench -p tendril --bench tendril -- --quick --significance-level 0.01
+      - uses: actions/checkout@v7
+      - run: cargo bench -p tendril-bench --bench tendril -- --quick --significance-level 0.01
         env:
           RUSTFLAGS: --cfg bench
-      - run: cargo bench -p tendril --bench futf -- --quick --significance-level 0.01
+      - run: cargo bench -p tendril-bench --bench futf -- --quick --significance-level 0.01
         env:
           RUSTFLAGS: --cfg bench
+
+  miri:
+    name: Tests with Miri
+    runs-on: ubuntu-latest
+    env:
+      # Miri is much slower than native, so running the entire test suite takes too much time
+      WHICH_TESTS: -p markup5ever -p tendril --features encoding_rs
+    steps:
+      - name: Which tests to run
+        run: echo "$WHICH_TESTS"
+      - uses: actions/checkout@v7
+      - name: Setup Miri
+        run: |
+          rustup set profile minimal
+          rustup override set nightly
+          rustup component add miri
+          cargo miri setup
+          cargo miri setup --target i686-unknown-linux-gnu
+          cargo miri setup --target s390x-unknown-linux-gnu
+      - name: Run some tests with Miri
+        run: cargo miri test $WHICH_TESTS
+      - name: Run some tests with Miri 32-bit
+        run: cargo miri test $WHICH_TESTS --target i686-unknown-linux-gnu
+      - name: Run some tests with Miri big-endian
+        run: cargo miri test $WHICH_TESTS --target s390x-unknown-linux-gnu
 
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install stable toolchain
+      - name: Install MSRV toolchain
         run: |
           rustup set profile minimal
-          rustup override set 1.71.0
+          rustup override set 1.85.0
+
+      - name: Downgrade some crates that have newer MSRV
+        # encoding_rs 0.8.40 requires Rust 1.88
+        run: |
+          cargo update encoding_rs --precise 0.8.35
 
       - run: cargo check --lib --all-features
 
@@ -85,7 +115,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install stable toolchain
         run: |
@@ -115,6 +145,7 @@ jobs:
       - msrv
       - bench-html5ever
       - bench-tendril
+      - miri
 
     steps:
       - name: Success

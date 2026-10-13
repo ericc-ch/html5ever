@@ -19,7 +19,7 @@ trace_tokenizer = []
 serde = ["markup5ever/serde"]
 
 [dependencies]
-markup5ever = "0.39"
+markup5ever = "0.40"
 log = { workspace = true }
 
 [dev-dependencies]
