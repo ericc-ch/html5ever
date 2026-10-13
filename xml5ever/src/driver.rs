@@ -8,7 +8,7 @@
 // except according to those terms.
 
 use crate::tokenizer::{XmlTokenizer, XmlTokenizerOpts};
-use crate::tree_builder::{TreeSink, XmlTreeBuilder, XmlTreeBuilderOpts, XmlTreeSink};
+use crate::tree_builder::{XmlTreeBuilder, XmlTreeBuilderOpts, XmlTreeSink};
 
 use std::borrow::Cow;
 
@@ -52,7 +52,7 @@ where
 ///
 /// Replacement text is spliced into the source, so markup inside it parses
 /// (<https://www.w3.org/TR/xml/#intern-replacement>). Expansion errors reach
-/// the sink through [`TreeSink::parse_error`].
+/// the sink through [`crate::tree_builder::TreeSink::parse_error`].
 pub fn parse_document_expanding_entities<Sink>(
     sink: Sink,
     opts: XmlParseOpts,
