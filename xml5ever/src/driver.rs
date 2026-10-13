@@ -8,7 +8,7 @@
 // except according to those terms.
 
 use crate::tokenizer::{XmlTokenizer, XmlTokenizerOpts};
-use crate::tree_builder::{XmlTreeBuilder, XmlTreeBuilderOpts, XmlTreeSink};
+use crate::tree_builder::{TreeSink, XmlTreeBuilder, XmlTreeBuilderOpts, XmlTreeSink};
 
 use std::borrow::Cow;
 
@@ -45,6 +45,30 @@ where
         tokenizer: tok,
         input_buffer: BufferQueue::default(),
     }
+}
+
+/// Parse a complete document, expanding the internal general entities its
+/// document type declares first.
+///
+/// Replacement text is spliced into the source, so markup inside it parses
+/// (<https://www.w3.org/TR/xml/#intern-replacement>). Expansion errors reach
+/// the sink through [`TreeSink::parse_error`].
+pub fn parse_document_expanding_entities<Sink>(
+    sink: Sink,
+    opts: XmlParseOpts,
+    input: &str,
+) -> Sink::Output
+where
+    Sink: XmlTreeSink,
+{
+    let (expanded, errors) = crate::entity::expand_internal_general_entities(input);
+    for error in errors {
+        sink.parse_error(Cow::Owned(error));
+    }
+    parse_document(sink, opts)
+        .from_utf8()
+        .read_from(&mut expanded.as_bytes())
+        .expect("reading a byte slice cannot fail")
 }
 
 /// An XML parser,

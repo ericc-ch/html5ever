@@ -36,6 +36,7 @@
 pub use markup5ever::*;
 
 pub(crate) mod macros;
+mod entity;
 
 /// Driver
 pub mod driver;
