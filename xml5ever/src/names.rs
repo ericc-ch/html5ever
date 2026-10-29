@@ -1,11 +1,15 @@
 //! The XML character productions that the parser and embedders share.
 //!
 //! A `Name` is the grammar for element and attribute names, entity names, and
-//! processing-instruction targets. Every consumer used to carry its own copy
-//! of the range table, which is how one copy drifts from another
+//! processing-instruction targets. `Char` is the code points a document may
+//! contain at all, and `S` is XML whitespace, which is not ASCII whitespace.
+//! Every consumer used to carry its own copy of the range tables, which is how
+//! one copy drifts from another
 //! (<https://www.w3.org/TR/xml/#NT-Name>,
 //! <https://www.w3.org/TR/xml/#NT-NameStartChar>,
-//! <https://www.w3.org/TR/xml/#NT-NameChar>).
+//! <https://www.w3.org/TR/xml/#NT-NameChar>,
+//! <https://www.w3.org/TR/xml/#NT-Char>,
+//! <https://www.w3.org/TR/xml/#NT-S>).
 
 /// Whether `character` may start an XML `Name`
 /// (<https://www.w3.org/TR/xml/#NT-NameStartChar>).
@@ -48,24 +52,63 @@ pub fn is_space(character: char) -> bool {
 mod tests {
     use super::{is_char, is_name, is_name_char, is_name_start_char, is_space};
 
-    #[test]
-    fn name_start_and_name_char_ranges() {
-        assert!(is_name_start_char('a'));
-        assert!(is_name_start_char(':'));
-        assert!(is_name_start_char('_'));
-        assert!(is_name_start_char('\u{C0}'));
-        assert!(is_name_start_char('\u{10000}'));
-        assert!(!is_name_start_char('1'));
-        assert!(!is_name_start_char('-'));
-        assert!(!is_name_start_char('.'));
-        assert!(!is_name_start_char('<'));
+    /// Every `NameStartChar` range, ends included
+    /// (<https://www.w3.org/TR/xml/#NT-NameStartChar>).
+    const NAME_START_RANGES: &[(char, char)] = &[
+        (':', ':'),
+        ('A', 'Z'),
+        ('_', '_'),
+        ('a', 'z'),
+        ('\u{C0}', '\u{D6}'),
+        ('\u{D8}', '\u{F6}'),
+        ('\u{F8}', '\u{2FF}'),
+        ('\u{370}', '\u{37D}'),
+        ('\u{37F}', '\u{1FFF}'),
+        ('\u{200C}', '\u{200D}'),
+        ('\u{2070}', '\u{218F}'),
+        ('\u{2C00}', '\u{2FEF}'),
+        ('\u{3001}', '\u{D7FF}'),
+        ('\u{F900}', '\u{FDCF}'),
+        ('\u{FDF0}', '\u{FFFD}'),
+        ('\u{10000}', '\u{EFFFF}'),
+    ];
 
-        assert!(is_name_char('1'));
-        assert!(is_name_char('-'));
-        assert!(is_name_char('.'));
-        assert!(is_name_char('a'));
-        assert!(is_name_char('\u{B7}'));
-        assert!(!is_name_char('<'));
+    fn neighbours(range: (char, char)) -> impl Iterator<Item = char> {
+        let (first, last) = range;
+        [first as u32 - 1, last as u32 + 1]
+            .into_iter()
+            .filter_map(char::from_u32)
+    }
+
+    #[test]
+    fn every_name_start_range_accepts_only_its_ends_and_between() {
+        for range in NAME_START_RANGES {
+            let (first, last) = *range;
+            assert!(is_name_start_char(first), "{first:?}");
+            assert!(is_name_start_char(last), "{last:?}");
+            assert!(is_name_char(first) && is_name_char(last));
+            for outside in neighbours(*range) {
+                assert!(!is_name_start_char(outside), "{outside:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn name_char_adds_the_four_infixes() {
+        for (first, last) in [
+            ('-', '-'),
+            ('.', '.'),
+            ('0', '9'),
+            ('\u{B7}', '\u{B7}'),
+            ('\u{300}', '\u{36F}'),
+            ('\u{203F}', '\u{2040}'),
+        ] {
+            assert!(is_name_char(first), "{first:?}");
+            assert!(is_name_char(last), "{last:?}");
+        }
+        for character in ['<', '>', '"', '/', '?', '\u{D7}', '\u{37E}', '\u{200E}'] {
+            assert!(!is_name_char(character), "{character:?}");
+        }
     }
 
     #[test]
@@ -80,14 +123,33 @@ mod tests {
     }
 
     #[test]
-    fn char_and_space_exclude_what_xml_excludes() {
-        assert!(is_char('\t'));
-        assert!(is_char('\u{10FFFF}'));
-        assert!(!is_char('\0'));
-        assert!(!is_char('\u{FFFE}'));
+    fn char_accepts_exactly_the_document_code_points() {
+        for character in [
+            '\t',
+            '\n',
+            '\r',
+            '\u{20}',
+            '\u{7F}',
+            '\u{D7FF}',
+            '\u{E000}',
+            '\u{FFFD}',
+            '\u{10FFFF}',
+        ] {
+            assert!(is_char(character), "{character:?}");
+        }
+        // A surrogate cannot be a `char`, so `is_char` never sees one.
+        for character in ['\0', '\u{1F}', '\u{FFFE}'] {
+            assert!(!is_char(character), "{character:?}");
+        }
+    }
 
-        assert!(is_space(' '));
-        assert!(is_space('\r'));
-        assert!(!is_space('\u{C}'));
+    #[test]
+    fn space_is_xml_whitespace_not_ascii_whitespace() {
+        for character in [' ', '\t', '\r', '\n'] {
+            assert!(is_space(character), "{character:?}");
+        }
+        for character in ['\u{B}', '\u{C}', '\u{85}'] {
+            assert!(!is_space(character), "{character:?}");
+        }
     }
 }
