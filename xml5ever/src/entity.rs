@@ -25,7 +25,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use crate::names::is_name;
+use crate::names::{is_name, is_space as is_xml_whitespace};
 
 const MAX_ENTITY_DECLS: usize = 10_000;
 const MAX_ENTITY_DEPTH: usize = 64;
@@ -720,10 +720,6 @@ fn skip_markup(rest: &str) -> usize {
         }
     }
     rest.len()
-}
-
-fn is_xml_whitespace(character: char) -> bool {
-    matches!(character, ' ' | '\t' | '\r' | '\n')
 }
 
 /// Predefined XML entities handled by the tokenizer's char-ref path, not by

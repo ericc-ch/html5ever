@@ -1598,11 +1598,4 @@ mod test {
         assert_eq!(qname.prefix, None);
         assert_eq!(qname.local, LocalName::from(":a:b:"));
     }
-
-    #[test]
-    fn pi_after_preserves_question_marks() {
-        // `<?t a?b?>` must keep the `?` in data; covered by the PiAfter
-        // push-`?`-then-char transitions above.
-        assert!(crate::names::is_name_start_char('x'));
-    }
 }
