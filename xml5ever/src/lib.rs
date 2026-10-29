@@ -35,11 +35,14 @@
 
 pub use markup5ever::*;
 
-pub(crate) mod macros;
 mod entity;
+pub(crate) mod macros;
 
 /// Driver
 pub mod driver;
+/// XML `Name`, `Char`, and whitespace productions, shared with embedders that
+/// validate the same grammar.
+pub mod names;
 /// Serializer for XML5.
 pub mod serialize;
 /// XML5 tokenizer - converts input into tokens

@@ -25,6 +25,8 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+use crate::names::is_name;
+
 const MAX_ENTITY_DECLS: usize = 10_000;
 const MAX_ENTITY_DEPTH: usize = 64;
 const MAX_EXPANDED_BYTES: usize = 32 * 1024 * 1024;
@@ -35,9 +37,7 @@ const MAX_ENTITY_OVERHEAD: usize = 1024;
 /// expand. Parse errors (undefined references, budget exhaustion) are
 /// collected for the sink to drain into a `parsererror` document
 /// (<https://www.w3.org/TR/xml/#sec-references>).
-pub(crate) fn expand_internal_general_entities(
-    input: &str,
-) -> (Cow<'_, str>, Vec<String>) {
+pub(crate) fn expand_internal_general_entities(input: &str) -> (Cow<'_, str>, Vec<String>) {
     let mut errors = Vec::new();
     let Some((body_start, entities)) = scan_internal_general_entities(input) else {
         return (Cow::Borrowed(input), errors);
@@ -129,9 +129,9 @@ fn scan_internal_general_entities(input: &str) -> Option<(usize, HashMap<String,
             '[' => {
                 subset_start = Some(after_keyword + index + 1);
                 break;
-            }
+            },
             '>' => return None,
-            _ => {}
+            _ => {},
         }
     }
     let subset_start = subset_start?;
@@ -183,7 +183,7 @@ fn find_subset_end(subset: &str) -> Option<usize> {
                 Some(end) => {
                     i += end + 3;
                     continue;
-                }
+                },
                 None => return None,
             }
         }
@@ -192,7 +192,7 @@ fn find_subset_end(subset: &str) -> Option<usize> {
                 Some(end) => {
                     i += end + 2;
                     continue;
-                }
+                },
                 None => return None,
             }
         }
@@ -230,11 +230,11 @@ fn parse_internal_general_entities(subset: &str) -> HashMap<String, String> {
             // declaration (<https://www.w3.org/TR/xml/#sec-entity-decl>).
             // `%` introduces a parameter entity, which we skip.
             match after.chars().next() {
-                Some(c) if is_xml_whitespace(c) || c == '%' => {}
+                Some(c) if is_xml_whitespace(c) || c == '%' => {},
                 _ => {
                     pos += skip_markup(rest);
                     continue;
-                }
+                },
             }
             let (consumed, entity) = parse_general_entity_decl(after);
             if let Some((name, value)) = entity {
@@ -279,7 +279,7 @@ fn parse_general_entity_decl(decl: &str) -> (usize, Option<(String, String)>) {
         name.push(c);
         chars.next();
     }
-    if name.is_empty() || !is_valid_name(&name) {
+    if name.is_empty() || !is_name(&name) {
         return (consumed, None);
     }
     while chars.peek().is_some_and(|c| is_xml_whitespace(*c)) {
@@ -392,11 +392,11 @@ fn decode_char_refs(text: &str) -> Cow<'_, str> {
             Some((character, consumed)) => {
                 decoded.push(character);
                 rest = &candidate[consumed..];
-            }
+            },
             None => {
                 decoded.push('&');
                 rest = &candidate[1..];
-            }
+            },
         }
     }
     decoded.push_str(rest);
@@ -473,12 +473,12 @@ fn expand_content(
                         return false;
                     }
                     pos += 1;
-                }
+                },
                 RefExpansion::Exhausted => {
                     output.truncate(mark);
                     output.push_str(&content[pos..]);
                     return false;
-                }
+                },
             }
             continue;
         }
@@ -529,7 +529,7 @@ fn expand_tag(
                         i += consumed;
                         text_start = i;
                         continue;
-                    }
+                    },
                     RefExpansion::Literal => {
                         if !push_budgeted(output, "&", budget) {
                             return false;
@@ -537,7 +537,7 @@ fn expand_tag(
                         i += 1;
                         text_start = i;
                         continue;
-                    }
+                    },
                     RefExpansion::Exhausted => return false,
                 }
             }
@@ -570,7 +570,7 @@ fn expand_entity_ref(
         return RefExpansion::Literal;
     };
     let name = &body[..name_end];
-    if !is_valid_name(name) {
+    if !is_name(name) {
         return RefExpansion::Literal;
     }
     if is_predefined_entity(name) {
@@ -622,7 +622,7 @@ fn expand_replacement(
                         return false;
                     }
                     pos += amp + 1;
-                }
+                },
                 RefExpansion::Exhausted => return false,
             }
         } else {
@@ -659,7 +659,7 @@ fn expand_nested_ref(
     // expansion also costs traversal work (HashSet insert/remove plus string
     // allocation per reference), so every expansion prepays a flat overhead:
     // without it an attacker trades bounded output for unbounded CPU.
-    if *budget == 0 || !is_valid_name(name) || is_predefined_entity(name) {
+    if *budget == 0 || !is_name(name) || is_predefined_entity(name) {
         return RefExpansion::Literal;
     }
     if depth >= MAX_ENTITY_DEPTH {
@@ -698,7 +698,7 @@ fn skip_decl_body(decl: &str) -> usize {
         match character {
             '"' | '\'' => quote = Some(character),
             '>' => return index + character.len_utf8(),
-            _ => {}
+            _ => {},
         }
     }
     decl.len()
@@ -716,7 +716,7 @@ fn skip_markup(rest: &str) -> usize {
         match character {
             '"' | '\'' => quote = Some(character),
             '>' => return index + character.len_utf8(),
-            _ => {}
+            _ => {},
         }
     }
     rest.len()
@@ -732,36 +732,12 @@ fn is_predefined_entity(name: &str) -> bool {
     matches!(name, "amp" | "lt" | "gt" | "apos" | "quot")
 }
 
-/// Whether `name` matches the XML `Name` production
-/// (<https://www.w3.org/TR/xml/#NT-Name>).
-fn is_valid_name(name: &str) -> bool {
-    let mut characters = name.chars();
-    match characters.next() {
-        Some(first) if is_name_start(first) => characters.all(is_name_char),
-        _ => false,
-    }
-}
-
-// https://www.w3.org/TR/xml/#NT-NameStartChar
-fn is_name_start(character: char) -> bool {
-    matches!(character, ':' | 'A'..='Z' | '_' | 'a'..='z' | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}' | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}' | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}')
-        || ('\u{10000}'..='\u{EFFFF}').contains(&character)
-}
-
-// https://www.w3.org/TR/xml/#NT-NameChar
-fn is_name_char(character: char) -> bool {
-    is_name_start(character)
-        || matches!(character, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{MAX_EXPANDED_BYTES, expand_internal_general_entities};
+    use super::{expand_internal_general_entities, MAX_EXPANDED_BYTES};
 
     fn expand(input: &str) -> String {
-        expand_internal_general_entities(input)
-            .0
-            .into_owned()
+        expand_internal_general_entities(input).0.into_owned()
     }
 
     fn doctype_with(decls: &str, body: &str) -> String {

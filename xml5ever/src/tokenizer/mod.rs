@@ -18,6 +18,7 @@ pub use self::interface::{
 pub use crate::{LocalName, Namespace, Prefix};
 
 use crate::macros::time;
+use crate::names::{is_name_char, is_name_start_char};
 use crate::tendril::StrTendril;
 use crate::{buffer_queue, Attribute, QualName, SmallCharSet};
 use log::debug;
@@ -692,7 +693,7 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                     },
                     // `:` is a valid NameStartChar
                     // (<https://www.w3.org/TR/xml/#NT-NameStartChar>).
-                    cl if is_xml_name_start(cl) => {
+                    cl if is_name_start_char(cl) => {
                         go!(self: create_tag StartTag cl; to XmlState::TagName)
                     },
                     _ => go!(self: error; emit '<'; reconsume XmlState::Data),
@@ -705,7 +706,7 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                     '\t' | '\n' | ' ' | '<' => {
                         go!(self: error; emit '<'; emit '/'; reconsume XmlState::Data)
                     },
-                    cl if is_xml_name_start(cl) => {
+                    cl if is_name_start_char(cl) => {
                         go!(self: create_tag EndTag cl; to XmlState::EndTagName)
                     },
                     _ => go!(self: error; emit '<'; emit '/'; reconsume XmlState::Data),
@@ -732,7 +733,7 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
             XmlState::Pi => loop {
                 match get_char!(self, input) {
                     '\t' | '\n' | ' ' => go!(self: error; reconsume XmlState::BogusComment),
-                    cl if is_xml_name_start(cl) => {
+                    cl if is_name_start_char(cl) => {
                         go!(self: create_pi cl; to XmlState::PiTarget)
                     },
                     _ => go!(self: error; reconsume XmlState::BogusComment),
@@ -743,7 +744,7 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 match get_char!(self, input) {
                     '\t' | '\n' | ' ' => go!(self: to XmlState::PiTargetAfter),
                     '?' => go!(self: to XmlState::PiAfter),
-                    cl if is_xml_name_char(cl) => go!(self: push_pi_target cl),
+                    cl if is_name_char(cl) => go!(self: push_pi_target cl),
                     _ => go!(self: error; reconsume XmlState::BogusComment),
                 }
             },
@@ -893,7 +894,9 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 match get_char!(self, input) {
                     '>' => go!(self: emit_cdata; to XmlState::Data),
                     ']' => go!(self: push_cdata ']'),
-                    cl => go!(self: push_cdata ']'; push_cdata ']'; push_cdata cl; to XmlState::Cdata),
+                    cl => {
+                        go!(self: push_cdata ']'; push_cdata ']'; push_cdata cl; to XmlState::Cdata)
+                    },
                 }
             },
             //§ tag-name-state
@@ -1145,10 +1148,10 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 match get_char!(self, input) {
                     c if Some(c) == quote => {
                         self.state.set(XmlState::DoctypeInternalSubset(None));
-                    }
+                    },
                     c @ ('"' | '\'') if quote.is_none() => {
                         self.state.set(XmlState::DoctypeInternalSubset(Some(c)));
-                    }
+                    },
                     '<' if quote.is_none() => go!(self: to XmlState::DoctypeSubsetMarkup(None)),
                     ']' if quote.is_none() => go!(self: to XmlState::AfterDoctypeSubset),
                     _ => (),
@@ -1161,10 +1164,10 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 match get_char!(self, input) {
                     c if Some(c) == quote => {
                         self.state.set(XmlState::DoctypeSubsetMarkup(None));
-                    }
+                    },
                     c @ ('"' | '\'') if quote.is_none() => {
                         self.state.set(XmlState::DoctypeSubsetMarkup(Some(c)));
-                    }
+                    },
                     '>' if quote.is_none() => go!(self: to XmlState::DoctypeInternalSubset(None)),
                     _ => (),
                 }
@@ -1408,20 +1411,6 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
     }
 }
 
-/// Whether `c` can start an XML `Name`
-/// (<https://www.w3.org/TR/xml/#NT-NameStartChar>).
-fn is_xml_name_start(c: char) -> bool {
-    matches!(c, ':' | 'A'..='Z' | '_' | 'a'..='z' | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}' | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}' | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}')
-        || ('\u{10000}'..='\u{EFFFF}').contains(&c)
-}
-
-/// Whether `c` can continue an XML `Name`
-/// (<https://www.w3.org/TR/xml/#NT-NameChar>).
-fn is_xml_name_char(c: char) -> bool {
-    is_xml_name_start(c)
-        || matches!(c, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
-}
-
 #[cfg(test)]
 mod test {
 
@@ -1611,22 +1600,9 @@ mod test {
     }
 
     #[test]
-    fn xml_name_validation() {
-        assert!(super::is_xml_name_start('a'));
-        assert!(super::is_xml_name_start(':'));
-        assert!(super::is_xml_name_start('_'));
-        assert!(!super::is_xml_name_start('1'));
-        assert!(!super::is_xml_name_start('-'));
-        assert!(!super::is_xml_name_start('.'));
-        assert!(super::is_xml_name_char('1'));
-        assert!(super::is_xml_name_char('-'));
-        assert!(!super::is_xml_name_char('<'));
-    }
-
-    #[test]
     fn pi_after_preserves_question_marks() {
         // `<?t a?b?>` must keep the `?` in data; covered by the PiAfter
         // push-`?`-then-char transitions above.
-        assert!(super::is_xml_name_start('x'));
+        assert!(crate::names::is_name_start_char('x'));
     }
 }
