@@ -237,27 +237,26 @@ impl CharRefTokenizer {
     }
 
     fn finish_numeric<Sink: TokenSink>(&mut self, tokenizer: &XmlTokenizer<Sink>) -> Status {
-        fn conv(n: u32) -> char {
-            from_u32(n).expect("invalid char missed by error handling cases")
-        }
-
-        let (c, error) = match self.num {
-            n if (n > 0x10FFFF) || self.num_too_big => ('\u{fffd}', true),
-            0x00 | 0xD800..=0xDFFF => ('\u{fffd}', true),
-
-            0x80..=0x9F => match data::C1_REPLACEMENTS[(self.num - 0x80) as usize] {
-                Some(c) => (c, true),
-                None => (conv(self.num), true),
-            },
-
-            0x01..=0x08 | 0x0B | 0x0D..=0x1F | 0x7F | 0xFDD0..=0xFDEF => (conv(self.num), true),
-
-            n if (n & 0xFFFE) == 0xFFFE => (conv(n), true),
-
-            n => (conv(n), false),
+        // A character reference must name a legal XML `Char`
+        // (<https://www.w3.org/TR/xml/#charsets>): #x9, #xA, #xD, #x20-#xD7FF,
+        // #xE000-#xFFFD, #x10000-#x10FFFF. HTML's table is a different
+        // production: it rewrites C1 controls through windows-1252 and treats
+        // #xD, #x7F, and the noncharacters as control references. Reusing it
+        // made `&#xD;` an error, and a navigated `.xht` containing one became a
+        // `parsererror` document instead of a tree.
+        let c = if self.num_too_big {
+            None
+        } else {
+            char::from_u32(self.num)
         };
+        let legal = c.is_some_and(|c| {
+            matches!(
+                c as u32,
+                0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+            )
+        });
 
-        if error {
+        if !legal {
             let msg = if tokenizer.opts.exact_errors {
                 Cow::from(format!(
                     "Invalid numeric character reference value 0x{:06X}",
@@ -269,7 +268,10 @@ impl CharRefTokenizer {
             tokenizer.emit_error(msg);
         }
 
-        self.finish_one(c)
+        // XML calls an illegal reference a fatal error. The tokenizer keeps
+        // parsing, so it contributes the replacement character rather than
+        // nothing, as the HTML tokenizer does.
+        self.finish_one(c.unwrap_or('\u{fffd}'))
     }
 
     fn do_named<Sink: TokenSink>(

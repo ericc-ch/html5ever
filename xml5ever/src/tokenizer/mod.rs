@@ -1598,4 +1598,29 @@ mod test {
         assert_eq!(qname.prefix, None);
         assert_eq!(qname.local, LocalName::from(":a:b:"));
     }
+
+    /// A numeric character reference must name a legal XML `Char`
+    /// (<https://www.w3.org/TR/xml/#charsets>). Every error here becomes a
+    /// `parsererror` document for a navigated XML response, so HTML's table
+    /// (which rejects #xD and rewrites C1 controls through windows-1252)
+    /// must not be used: a `.xht` with `&#xD;` is well-formed.
+    #[test]
+    fn numeric_references_follow_the_xml_char_production() {
+        // Legal: TAB, LF, CR, the C1 range, DEL, and a BMP noncharacter range
+        // are all inside «Char»; XML only excludes #xFFFE and #xFFFF of the
+        // BMP.
+        assert_eq!(
+            tokenize_errors("&#x9;&#10;&#x0D;&#x80;&#x9F;&#x7F;&#xFDD0;&#xFFFD;"),
+            Vec::<String>::new()
+        );
+
+        // Illegal: NUL, VT, FF, a surrogate, and a code point above the last.
+        for reference in ["&#x0;", "&#xB;", "&#xC;", "&#xD800;", "&#x110000;"] {
+            assert_eq!(
+                tokenize_errors(reference).len(),
+                1,
+                "{reference} is not an XML Char and must be reported"
+            );
+        }
+    }
 }
