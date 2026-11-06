@@ -332,6 +332,35 @@ const IGNORED_TESTS: &[&str] = &[
     "PI tag with char in PiAfter state",
 ];
 
+/// Whether `description` names a case that bakes the XML5 draft's character
+/// rules instead of XML 1.0's.
+///
+/// The corpus rejects and rewrites references that the `Char` production
+/// allows (`https://www.w3.org/TR/xml/#charsets`): `#xD`, the C1 controls that
+/// HTML remaps through windows-1252, and the noncharacters inside the
+/// production's ranges. This fork follows the production, so those cases
+/// assert a parser state we must not produce. The code-point cases are decided
+/// by `is_char` itself, so a corpus point the production rejects still runs.
+fn bakes_html_char_rules(description: &str) -> bool {
+    if description == "CR as numeric entity" || description == "CR as hexadecimal numeric entity" {
+        return true;
+    }
+    if description.starts_with("Windows-1252 ") && description.contains("numeric entity") {
+        return true;
+    }
+    let Some(code_point) = description
+        .strip_prefix("Invalid numeric entity character U+")
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+    else {
+        return false;
+    };
+    char::from_u32(code_point).is_some_and(xml5ever::names::is_char)
+}
+
+fn skip_test(description: &str) -> bool {
+    IGNORED_TESTS.contains(&description) || bakes_html_char_rules(description)
+}
+
 fn mk_xml_test(
     name: String,
     skip: bool,
@@ -364,7 +393,7 @@ fn mk_xml_tests(tests: &mut Vec<Test>, filename: &str, js: &Value) {
     let input: &str = &js.find("input").get_str();
     let expect = js.find("output");
     let description = js.find("description").get_str();
-    let skip = IGNORED_TESTS.contains(&&*description);
+    let skip = skip_test(&description);
     let desc = format!("tok: {filename}: {description}");
 
     // Some tests want to start in a state other than Data.
